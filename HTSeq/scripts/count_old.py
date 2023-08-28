@@ -1,6 +1,6 @@
+# DEPRECATE AND REMOVE ME IN THE FUTURE
 import sys
 import argparse
-from collections import Counter, defaultdict
 import operator
 import itertools
 import warnings
@@ -9,6 +9,7 @@ import os.path
 import multiprocessing
 import numpy as np
 import pysam
+import random
 
 import HTSeq
 from HTSeq.scripts.utils import (
@@ -19,42 +20,8 @@ from HTSeq.scripts.utils import (
 )
 
 
-def correct_barcodes(counts, hamming=1):
-    '''Correct barcodes, usually UMIs.
-
-    Notice: This function does not use recursive correction. Recursion sounds
-    great in theory, but due to experimental corner cases it can lead to
-    overcorrection and loss of signal.
-    '''
-    if hamming == 0:
-        return
-
-    # Count reads from all feature per barcode, and prepare to oder
-    n_reads = Counter({key: sum(val.values()) for key, val in counts.items()})
-
-    # Order by counts, from most to least
-    order = [umi for (umi, _) in n_reads.most_common()]
-
-    # Get close Hamming distances, and aggregate them into higher count ones
-    umi_vectors = np.array([list(x) for x in order])
-    idx_left = list(range(len(order)))
-    while idx_left:
-        i = idx_left.pop(0)
-        vi = ''.join(umi_vectors[i])
-        # Distance from all remaining barcodes
-        dis = (umi_vectors[i] != umi_vectors[idx_left]).sum(axis=1)
-        # Get indices of barcodes within reach
-        idx = (dis <= hamming).nonzero()[0]
-        js = [idx_left[idxi] for idxi in idx]
-        for j in js:
-            # Merge barcode counts into higher count one
-            vj = ''.join(umi_vectors[j])
-            counts[vi].update(counts.pop(vj))
-        # Shorten list of remaining UMIs
-        idx_left = [j for j in idx_left if j not in js]
-
-
-def count_reads_with_barcodes(
+def count_reads_single_file(
+        isam,
         sam_filename,
         features,
         feature_attr,
@@ -72,9 +39,6 @@ def count_reads_with_barcodes(
         minaqual,
         samout_format,
         samout_filename,
-        cb_tag,
-        ub_tag,
-        correct_ub_distance,
         ):
 
     def write_to_samout(r, assignment, samoutfile, template=None):
@@ -94,49 +58,13 @@ def count_reads_with_barcodes(
                         'BAM/SAM output: no template and not a test SAM file',
                     )
 
-    def identify_barcodes(r):
-        '''Identify barcode from the read or pair (both must have the same)'''
-        if not pe_mode:
-            r = (r,)
-
-        # If either cell or UMI barcode doesn't exist, just raise exception
-        has_cb_tag = False
-        has_ub_tag = False
-        for read in r:
-            if read is not None:
-                # If tags have not been found, then try to find it
-                if not has_cb_tag:
-                    has_cb_tag = read.has_optional_field(cb_tag)
-                if not has_ub_tag:
-                    has_ub_tag = read.has_optional_field(ub_tag)
-        if not has_cb_tag or not has_ub_tag:
-            raise Exception("Missing cell or UMI barcode")
-
-        # cell, UMI
-        barcodes = [None, None]
-        nbar = 0
-        for read in r:
-            if read is not None:
-                for tag, val in read.optional_fields:
-                    if tag == cb_tag:
-                        barcodes[0] = val
-                        nbar += 1
-                        if nbar == 2:
-                            return barcodes
-                    elif tag == ub_tag:
-                        barcodes[1] = val
-                        nbar += 1
-                        if nbar == 2:
-                            return barcodes
-        return barcodes
-
     try:
         if sam_filename == "-":
             read_seq_file = HTSeq.BAM_Reader(sys.stdin)
         else:
             read_seq_file = HTSeq.BAM_Reader(sam_filename)
 
-        # Get template for output BAM
+        # Get template for output BAM/SAM if possible
         if samout_filename is None:
             template = None
             samoutfile = None
@@ -178,6 +106,7 @@ def count_reads_with_barcodes(
     # CIGAR match characters (including alignment match, sequence match, and
     # sequence mismatch
     com = ('M', '=', 'X')
+    counts = {key: 0 for key in feature_attr}
 
     try:
         if pe_mode:
@@ -197,9 +126,11 @@ def count_reads_with_barcodes(
                         primary_only=primary_only)
             else:
                 raise ValueError("Illegal order specified.")
-
-        # The nesting is cell barcode, UMI, feature
-        counts = defaultdict(lambda: defaultdict(Counter))
+        empty = 0
+        ambiguous = 0
+        notaligned = 0
+        lowqual = 0
+        nonunique = 0
         i = 0
         for r in read_seq:
             if i > 0 and i % 100000 == 0 and not quiet:
@@ -209,19 +140,9 @@ def count_reads_with_barcodes(
                 sys.stderr.flush()
 
             i += 1
-
-            try:
-                cb, ub = identify_barcodes(r)
-            except:
-                # Happens when cb or ub is not found
-                write_to_samout(
-                    r, "__too_low_aQual", samoutfile,
-                    template)
-                continue
-
             if not pe_mode:
                 if not r.aligned:
-                    counts[cb][ub]['__not_aligned'] += 1
+                    notaligned += 1
                     write_to_samout(
                             r, "__not_aligned", samoutfile,
                             template)
@@ -234,7 +155,7 @@ def count_reads_with_barcodes(
                     continue
                 try:
                     if r.optional_field("NH") > 1:
-                        counts[cb][ub]['__alignment_not_unique'] += 1
+                        nonunique += 1
                         write_to_samout(
                                 r,
                                 "__alignment_not_unique",
@@ -245,7 +166,7 @@ def count_reads_with_barcodes(
                 except KeyError:
                     pass
                 if r.aQual < minaqual:
-                    counts[cb][ub]['__too_low_aQual'] += 1
+                    lowqual += 1
                     write_to_samout(
                             r, "__too_low_aQual", samoutfile,
                             template)
@@ -283,7 +204,7 @@ def count_reads_with_barcodes(
                         write_to_samout(
                                 r, "__not_aligned", samoutfile,
                                 template)
-                        counts[cb][ub]['__not_aligned'] += 1
+                        notaligned += 1
                         continue
                 if secondary_alignment_mode == 'ignore':
                     if (r[0] is not None) and r[0].not_primary_alignment:
@@ -298,20 +219,20 @@ def count_reads_with_barcodes(
                 try:
                     if ((r[0] is not None and r[0].optional_field("NH") > 1) or
                        (r[1] is not None and r[1].optional_field("NH") > 1)):
+                        nonunique += 1
                         write_to_samout(
                                 r, "__alignment_not_unique", samoutfile,
                                 template)
-                        counts[cb][ub]['__alignment_not_unique'] += 1
                         if multimapped_mode == 'none':
                             continue
                 except KeyError:
                     pass
                 if ((r[0] and r[0].aQual < minaqual) or
                    (r[1] and r[1].aQual < minaqual)):
+                    lowqual += 1
                     write_to_samout(
                             r, "__too_low_aQual", samoutfile,
                             template)
-                    counts[cb][ub]['__too_low_aQual'] += 1
                     continue
 
             try:
@@ -342,13 +263,13 @@ def count_reads_with_barcodes(
                     write_to_samout(
                             r, "__no_feature", samoutfile,
                             template)
-                    counts[cb][ub]['__no_feature'] += 1
+                    empty += 1
                 elif len(fs) > 1:
                     write_to_samout(
-                            r, "__ambiguous[" + '+'.join(fs) + "]",
+                            r, "__ambiguous[" + '+'.join(sorted(fs)) + "]",
                             samoutfile,
                             template)
-                    counts[cb][ub]['__ambiguous'] += 1
+                    ambiguous += 1
                 else:
                     write_to_samout(
                             r, list(fs)[0], samoutfile,
@@ -357,19 +278,24 @@ def count_reads_with_barcodes(
                 if fs is not None and len(fs) > 0:
                     if multimapped_mode == 'none':
                         if len(fs) == 1:
-                            counts[cb][ub][list(fs)[0]] += 1
+                            counts[list(fs)[0]] += 1
                     elif multimapped_mode == 'all':
                         for fsi in list(fs):
-                            counts[cb][ub][fsi] += 1
+                            counts[fsi] += 1
+                    elif multimapped_mode == 'fraction':
+                        for fsi in list(fs):
+                            counts[fsi] += 1.0 / len(fs)
+                    elif multimapped_mode == 'random':
+                        fsi = random.choice(list(fs))
+                        counts[fsi] += 1
                     else:
                         sys.exit("Illegal multimap mode.")
-
 
             except UnknownChrom:
                 write_to_samout(
                         r, "__no_feature", samoutfile,
                         template)
-                counts[cb][ub]['__no_feature'] += 1
+                empty += 1
 
     except:
         sys.stderr.write(
@@ -386,33 +312,19 @@ def count_reads_with_barcodes(
     if samoutfile is not None:
         samoutfile.close()
 
-    # A UMI could be mapped to more than one feature. We count the feature
-    # with the highest number of reads. In case of ties, we discard the whole
-    # UMI to be on the safe side (it should not happen anyway).
-    cbs = sorted(counts.keys())
-    counts_noumi = {}
-    for cb in cbs:
-        counts_cell = Counter()
-
-        # Correct barcodes within a certain Hamming distance
-        correct_barcodes(counts[cb], hamming=correct_ub_distance)
-
-        for ub, udic in counts.pop(cb).items():
-            # In case of a tie, do not increment either feature
-            top = udic.most_common(2)
-            if (len(top) == 2) and (top[0][1] == top[1][1]):
-                continue
-            counts_cell[top[0][0]] += 1
-        counts_noumi[cb] = counts_cell
-
     return {
-        'cell_barcodes': cbs,
-        'counts': counts_noumi,
-        }
+        'isam': isam,
+        'counts': counts,
+        'empty': empty,
+        'ambiguous': ambiguous,
+        'lowqual': lowqual,
+        'notaligned': notaligned,
+        'nonunique': nonunique,
+    }
 
 
 def count_reads_in_features(
-        sam_filename,
+        sam_filenames,
         gff_filename,
         order,
         max_buffer_size,
@@ -427,33 +339,51 @@ def count_reads_in_features(
         add_chromosome_info,
         quiet,
         minaqual,
-        samout,
+        samouts,
         samout_format,
         output_delimiter,
         output_filename,
+        output_append,
+        nprocesses,
+        feature_query,
         counts_output_sparse,
-        cb_tag,
-        ub_tag,
-        correct_ub_distance,
         ):
     '''Count reads in features, parallelizing by file'''
 
-    if samout is not None:
-        # Try to open samout file early in case any of them has issues
+    # Never use more CPUs than files
+    nprocesses = min(nprocesses, len(sam_filenames))
+
+    if samouts != []:
+        if len(samouts) != len(sam_filenames):
+            raise ValueError(
+                    'Select the same number of input and output files')
+        # Try to open samout files early in case any of them has issues
         if samout_format in ('SAM', 'sam'):
-            with open(samout, 'w'):
-                pass
+            for samout in samouts:
+                with open(samout, 'w'):
+                    pass
         else:
             # We don't have a template if the input is stdin
-            if sam_filename != '-':
-                with pysam.AlignmentFile(sam_filename, 'r') as sf:
-                    with pysam.AlignmentFile(samout, 'w', template=sf):
-                        pass
+            if (len(sam_filenames) != 1) or (sam_filenames[0] != '-'):
+                for sam_filename, samout in zip(sam_filenames, samouts):
+                    with pysam.AlignmentFile(sam_filename, 'r') as sf:
+                        with pysam.AlignmentFile(samout, 'w', template=sf):
+                            pass
+    else:
+        samouts = [None for x in sam_filenames]
 
     # Try to open samfiles to fail early in case any of them is not there
-    if sam_filename != '-':
-        with pysam.AlignmentFile(sam_filename, 'r') as sf:
-            pass
+    if (len(sam_filenames) != 1) or (sam_filenames[0] != '-'):
+        for sam_filename in sam_filenames:
+            with pysam.AlignmentFile(sam_filename, 'r') as sf:
+                pass
+
+    # Deal with custom id_attribute lists. This is never shorter than 1 because
+    # gene_id is the default. However, if the option was called at least once,
+    # that should _override_ the default, which means skipping the first
+    # element (i.e., gene_id).
+    if len(id_attribute) > 1:
+        del id_attribute[0]
 
     # Prepare features
     gff = HTSeq.GFF_Reader(gff_filename)
@@ -461,6 +391,7 @@ def count_reads_in_features(
         gff,
         id_attribute,
         feature_type=feature_type,
+        feature_query=feature_query,
         additional_attributes=additional_attributes,
         stranded=stranded != 'no',
         verbose=not quiet,
@@ -474,39 +405,47 @@ def count_reads_in_features(
         sys.stderr.write(
             "Warning: No features of type '%s' found.\n" % feature_type)
 
-    # Count reads
-    results = count_reads_with_barcodes(
-        sam_filename,
-        features,
-        feature_attr,
-        order,
-        max_buffer_size,
-        stranded,
-        overlap_mode,
-        multimapped_mode,
-        secondary_alignment_mode,
-        supplementary_alignment_mode,
-        feature_type,
-        id_attribute,
-        additional_attributes,
-        quiet,
-        minaqual,
-        samout_format,
-        samout,
-        cb_tag,
-        ub_tag,
-        correct_ub_distance,
-        )
+    # Prepare arguments for counting function
+    args = []
+    for isam, (sam_filename, samout_filename) in enumerate(zip(sam_filenames, samouts)):
+        args.append((
+            isam,
+            sam_filename,
+            features,
+            feature_attr,
+            order,
+            max_buffer_size,
+            stranded,
+            overlap_mode,
+            multimapped_mode,
+            secondary_alignment_mode,
+            supplementary_alignment_mode,
+            feature_type,
+            id_attribute,
+            additional_attributes,
+            quiet,
+            minaqual,
+            samout_format,
+            samout_filename,
+            ))
 
-    # Write output
+    # Count reads in parallel
+    if nprocesses > 1:
+        with multiprocessing.Pool(nprocesses) as pool:
+            results = pool.starmap(count_reads_single_file, args)
+        results.sort(key=operator.itemgetter('isam'))
+    else:
+        results = list(itertools.starmap(count_reads_single_file, args))
+
+    # Merge and write output
     _write_output(
         results,
-        results['cell_barcodes'],
+        sam_filenames,
         attributes,
         additional_attributes,
         output_filename,
         output_delimiter,
-        False,
+        output_append,
         sparse=counts_output_sparse,
         dtype=np.float32,
     )
@@ -515,40 +454,30 @@ def count_reads_in_features(
 def main():
 
     pa = argparse.ArgumentParser(
-        add_help=False,
-    )
-
-    pa.add_argument(
-            "--version", action="store_true",
-            help='Show software version and exit')
-    args, argv = pa.parse_known_args()
-
-    # Version is the only case where the BAM and GTF files are optional
-    if args.version:
-        print(HTSeq.__version__)
-        sys.exit()
-
-    pa = argparse.ArgumentParser(
-        parents=[pa],
-        description="This script takes one alignment file in SAM/BAM " +
+        usage="%(prog)s [options] alignment_file gff_file",
+        description="This script takes one or more alignment files in SAM/BAM " +
         "format and a feature file in GFF format and calculates for each feature " +
-        "the number of reads mapping to it, accounting for barcodes. See " +
+        "the number of reads mapping to it. See " +
         "http://htseq.readthedocs.io/en/master/count.html for details.",
         epilog="Written by Simon Anders (sanders@fs.tum.de), " +
         "European Molecular Biology Laboratory (EMBL) and Fabio Zanini " +
         "(fabio.zanini@unsw.edu.au), UNSW Sydney. (c) 2010-2020. " +
         "Released under the terms of the GNU General Public License v3. " +
-        "Please cite the following paper if you use this script: \n" +
-        "    G. Putri et al. Analysing high-throughput sequencing data in " +
-        "Python with HTSeq 2.0. Bioinformatics (2022). " +
-        "https://doi.org/10.1093/bioinformatics/btac166.\n" +
-        "Part of the 'HTSeq' framework, version %s." % HTSeq.__version__,
-    )
+        "Part of the 'HTSeq' framework, version %s." % HTSeq.__version__)
 
     pa.add_argument(
-            "samfilename", type=str,
-            help="Path to the SAM/BAM file containing the barcoded, mapped " +
-            "reads. If '-' is selected, read from standard input")
+            "--version", action="store_true",
+            help='Show software version and exit')
+    args, argv = pa.parse_known_args()
+    # Version is the only case where the BAM and GTF files are optional
+    if args.version:
+        print(HTSeq.__version__)
+        sys.exit()
+
+    pa.add_argument(
+            "samfilenames", nargs='+', type=str,
+            help="Path to the SAM/BAM files containing the mapped reads. " +
+            "If '-' is selected, read from standard input")
 
     pa.add_argument(
             "featuresfilename", type=str,
@@ -598,9 +527,17 @@ def main():
 
     pa.add_argument(
             "-i", "--idattr", type=str, dest="idattr",
-            default="gene_id",
+            action='append',
+            default=["gene_id"],
             help="GTF attribute to be used as feature ID (default, " +
-            "suitable for Ensembl GTF files: gene_id)")
+            "suitable for Ensembl GTF files: gene_id). All feature of the " +
+            "right type (see -t option) within the same GTF attribute will " +
+            "be added together. The typical way of using this option is to " +
+            "count all exonic reads from each gene and add the exons " +
+            "but other uses are possible as well. You can call this option " +
+            "multiple times: in that case, the combination of all attributes " +
+            "separated by colons (:) will be used as a unique identifier, " +
+            "e.g. for exons you might use -i gene_id -i exon_number.")
 
     pa.add_argument(
             "--additional-attr", type=str,
@@ -608,7 +545,9 @@ def main():
             default=[],
             help="Additional feature attributes (default: none, " +
             "suitable for Ensembl GTF files: gene_name). Use multiple times " +
-            "for each different attribute")
+            "for more than one additional attribute. These attributes are " +
+            "only used as annotations in the output, while the determination " +
+            "of how the counts are added together is done based on option -i.")
 
     pa.add_argument(
             "--add-chromosome-info", action='store_true',
@@ -625,9 +564,10 @@ def main():
 
     pa.add_argument(
             "--nonunique", dest="nonunique", type=str,
-            choices=("none", "all"), default="none",
-            help="Whether to score reads that are not uniquely aligned " +
-            "or ambiguously assigned to features")
+            choices=("none", "all", "fraction", "random"), default="none",
+            help="Whether and how to score reads that are not uniquely aligned " +
+            "or ambiguously assigned to features " +
+            "(choices: none, all, fraction, random; default: none)")
 
     pa.add_argument(
             "--secondary-alignments", dest="secondary_alignments", type=str,
@@ -640,10 +580,11 @@ def main():
             help="Whether to score supplementary alignments (0x800 flag)")
 
     pa.add_argument(
-            "-o", "--samout", type=str, dest="samout",
-            default=None,
-            help="Write out all SAM alignment records into a" +
-            "SAM/BAM file, annotating each line " +
+            "-o", "--samout", type=str, dest="samouts",
+            action='append',
+            default=[],
+            help="Write out all SAM alignment records into " +
+            "SAM/BAM files (one per input file needed), annotating each line " +
             "with its feature assignment (as an optional field with tag 'XF')" +
             ". See the -p option to use BAM instead of SAM.")
 
@@ -661,40 +602,44 @@ def main():
     pa.add_argument(
             "-c", '--counts_output', type=str, dest='output_filename',
             default='',
-            help="TSV/CSV filename to output the counts to instead of stdout."
+            help="Filename to output the counts to instead of stdout."
             )
 
     pa.add_argument(
-            "--counts_output_sparse", action='store_true',
+            "--counts-output-sparse", action='store_true',
             help="Store the counts as a sparse matrix (mtx, h5ad, loom)."
             )
 
     pa.add_argument(
-            '--cell-barcode', type=str, dest='cb_tag',
-            default='CB',
-            help='BAM tag used for the cell barcode (default compatible ' +
-            'with 10X Genomics Chromium is CB).',
+            '--append-output', action='store_true', dest='output_append',
+            help='Append counts output to an existing file instead of ' +
+            'creating a new one. This option is useful if you have ' +
+            'already creates a TSV/CSV/similar file with a header for your ' +
+            'samples (with additional columns for the feature name and any ' +
+            'additionl attributes) and want to fill in the rest of the file.'
             )
 
     pa.add_argument(
-            '--UMI', type=str, dest='ub_tag',
-            default='UB',
-            help='BAM tag used for the unique molecular identifier, also ' +
-            'known as molecular barcode (default compatible ' +
-            'with 10X Genomics Chromium is UB).',
+            "-n", '--nprocesses', type=int, dest='nprocesses',
+            default=1,
+            help="Number of parallel CPU processes to use (default: 1). " +
+            "This option is useful to process several input files at once. " +
+            "Each file will use only 1 CPU. It is possible, of course, to " +
+            "split a very large input SAM/BAM files into smaller chunks " +
+            "upstream to make use of this option."
             )
 
     pa.add_argument(
-            '--correct-UMI-distance',
-            type=int,
-            choices=[0, 1, 2],
-            dest='correct_ub_distance',
-            default=0,
-            help='Correct for sequencing errors in the UMI tag, based on ' +
-            'Hamming distance. For each UMI, if another UMI with more reads ' +
-            'within 1 or 2 mutations is found, merge this UMI\'s reads into ' +
-            'the more popular one. The default is to not correct UMIs.',
-    )
+            '--feature-query', type=str, dest='feature_query',
+            default=None,
+            help='Restrict to features descibed in this expression. Currently ' +
+            'supports a single kind of expression: attribute == "one attr" to ' +
+            'restrict the GFF to a single gene or transcript, e.g. ' +
+            '--feature-query \'gene_name == "ACTB"\' - notice the single ' +
+            'quotes around the argument of this option and the double ' +
+            'quotes around the gene name. Broader queries might become ' +
+            'available in the future.',
+            )
 
     pa.add_argument(
             "-q", "--quiet", action="store_true", dest="quiet",
@@ -705,7 +650,7 @@ def main():
     warnings.showwarning = my_showwarning
     try:
         count_reads_in_features(
-                args.samfilename,
+                args.samfilenames,
                 args.featuresfilename,
                 args.order,
                 args.max_buffer_size,
@@ -720,14 +665,14 @@ def main():
                 args.add_chromosome_info,
                 args.quiet,
                 args.minaqual,
-                args.samout,
+                args.samouts,
                 args.samout_format,
                 args.output_delimiter,
                 args.output_filename,
+                args.output_append,
+                args.nprocesses,
+                args.feature_query,
                 args.counts_output_sparse,
-                args.cb_tag,
-                args.ub_tag,
-                args.correct_ub_distance,
                 )
     except:
         sys.stderr.write("  %s\n" % str(sys.exc_info()[1]))

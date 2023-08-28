@@ -101,6 +101,21 @@ def count_reads_single_file(
             order=order,
             max_buffer_size=max_buffer_size,
         )
+
+        # If the BAM header is available, check that at least one of the
+        # chromosomes is also found in the GTF/GFF file, otherwise the user
+        # is probably doing something wrong (e.g. "chr1" vs "1").
+        bam_chroms = read_io_obj.get_chromosome_names_header()
+        if bam_chroms is not None:
+            bam_chroms = set(bam_chroms)
+            feature_chroms = set(features.chrom_vectors.keys())
+            if not (bam_chroms & feature_chroms):
+                sys.stderr.write(
+                    f"The alignment file has no chromosomes in common with the GFF/GTF "
+                    "file. This will result in zero feature counts. Please check if the "
+                    "references match, e.g. if you are using 'chr1' or '1' as "
+                    "chromosome names.\n")
+
     except:
         sys.stderr.write("Error occurred when reading beginning of SAM/BAM file.\n")
         raise
@@ -124,8 +139,7 @@ def count_reads_single_file(
             read_stats.print_progress()
             read_stats.add_num_reads_processed()
 
-            # todo can move this into a function, but not necessary.
-            #  this basically try to get the interval/read sequence.
+            #  get the interval/read sequence.
             if not read_io_obj.pe_mode:
                 skip_read = _assess_non_pe_read(
                     read_sequence=r,
@@ -141,10 +155,11 @@ def count_reads_single_file(
                 iv_seq = _get_iv_seq_non_pe_read(com, r, stranded)
             else:
 
-                # todo these assessor used to be at the bottom, after creating
-                # the iv_seq and checking whether the first element of the
-                # paired end is aligned. Kind of nuts really as it wastes time?
-                # need more testing though
+                # NOTE: the logic here is a little arbitrary and might benefit
+                # from an optional arg. If the reads are paired-end but one of
+                # the two is missing, ATM we rely on the other one for info,
+                # however the data is technically inconsistent and we might
+                # want to let the user choose.
                 skip_read = _assess_pe_read(
                     minaqual,
                     multimapped_mode,
@@ -341,7 +356,12 @@ def _assess_pe_read(
     -------
 
     """
-    if (read_sequence[0] is None) or not (read_sequence[0].aligned):
+    # NOTE: Sometimes read1 is None or not aligned but read2 is fine, in that
+    # case we should not exclude the entire pair but rather use the interval
+    # of the second read
+    read1_miss = (read_sequence[0] is None) or (not read_sequence[0].aligned)
+    read2_miss = (read_sequence[1] is None) or (not read_sequence[1].aligned)
+    if read1_miss and read2_miss:
         read_stats.add_not_aligned_read(read_sequence=read_sequence)
         return True
 

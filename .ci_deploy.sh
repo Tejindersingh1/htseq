@@ -9,6 +9,7 @@ if [ $OS_NAME == 'macos-latest' ]; then
   TAG1=$(echo $TAG | cut -f1 -d_)
   TAG2=$(echo $TAG | cut -f2 -d_)
   TAG3=$(echo $TAG | cut -f3 -d_)
+  echo "GITHUB_REF: ${GITHUB_REF}, TAG: ${TAG}, TAG1: ${TAG1}, TAG2: ${TAG2}, TAG3: ${TAG3}"
   if [ -z $TAG2 ]; then
     echo 'No TAG2, exit'
     exit 0;
@@ -43,12 +44,13 @@ if [ $OS_NAME == 'macos-latest' ]; then
   set -e  
 
   # Only deploy on 10.14 to ensure 10.9+ compatibility and Mojave header/linker changes
+  # NOTE: try deploying on 11.6.5 and see if it works
   osx_version=$(sw_vers -productVersion)
   echo "OSX version: $osx_version"
   osx_ver1=$(echo $osx_version | cut -d. -f1)
   osx_ver2=$(echo $osx_version | cut -d. -f2)
-  if [ $osx_ver1 -lt 10 ] || [ $osx_ver2 -lt 14 ]; then
-    echo "OSX version not for deployment: $osx_version"
+  if [ $osx_ver1 -lt 11 ] || [ $osx_ver2 -lt 6 ]; then
+   echo "OSX version not for deployment (<11.6): $osx_version"
     exit 1
   fi
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-from __future__ import print_function
-import sys
 import os
-from distutils.log import INFO as logINFO
+import sys
+from setuptools import setup, Command, Extension
+from setuptools.command.build_py import build_py
 
 
 this_directory = os.path.abspath(os.path.dirname(__file__))
@@ -21,6 +21,7 @@ def update_version():
             output = output.decode().strip('\n')
         if output.startswith('release_'):
             version = output.split('_')[1]
+        print('VERSION updated: '+version)
     except:
         pass
 
@@ -54,46 +55,28 @@ with open(os.path.join(this_directory, 'README.md')) as f:
     long_description = f.read()
 
 # Check OS-specific quirks
-try:
-    from setuptools import setup, Extension
-    from setuptools.command.build_py import build_py
-    from setuptools import Command
-    # Setuptools but not distutils support build/runtime/optional dependencies
-    # NOTE: setuptools < 18.0 has issues with Cython as a dependency
-    # NOTE: old setuptools < 18.0 has issues with extras
-    kwargs = dict(
-        setup_requires=[
-              'Cython',
-              'numpy',
-              'pysam',
+# NOTE: setuptools < 18.0 has issues with Cython as a dependency
+# NOTE: old setuptools < 18.0 has issues with extras
+kwargs = dict(
+    setup_requires=[
+          'Cython',
+          'numpy',
+          'pysam',
+    ],
+    install_requires=[
+        'numpy',
+        'pysam',
+    ],
+    extras_require={
+        'htseq-qa': ['matplotlib>=1.4'],
+        'test': [
+            'scipy>=1.5.0',
+            'pytest>=6.2.5',
+            'pandas>=1.1.0',
+            'matplotlib>=1.4',
         ],
-        install_requires=[
-            'numpy',
-            'pysam',
-        ],
-        extras_require={
-            'htseq-qa': ['matplotlib>=1.4'],
-            'test': [
-                'scipy>=1.5.0',
-                'pytest>=6.2.5',
-                'pandas>=1.1.0',
-                'matplotlib>=1.4',
-            ],
-        },
-      )
-except ImportError:
-    sys.stderr.write("Could not import 'setuptools'," +
-                     " falling back to 'distutils'.\n")
-    from distutils.core import setup, Extension
-    from distutils.command.build_py import build_py
-    from distutils.cmd import Command
-    kwargs = dict(
-        requires=[
-              'Cython',
-              'numpy',
-              'pysam',
-            ]
-    )
+    },
+  )
 
 try:
     import numpy
@@ -111,30 +94,30 @@ numpy_include_dir = os.path.join(
         )
 
 
-def get_include_dirs(cpp=False):
-    '''OSX 10.14 and later split the /usr/include contents everywhere'''
-    include_dirs = []
-    if sys.platform != 'darwin':
-        return include_dirs
-
-    paths = {
-        'C': [
-            '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/',
-        ],
-        'C++': [
-            '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1/',
-        ],
-    }
-
-    for path in paths['C']:
-        if os.path.isdir(path):
-            include_dirs.append(path)
-    if cpp:
-        for path in paths['C++']:
-            if os.path.isdir(path):
-                include_dirs.append(path)
-
-    return include_dirs
+#def get_include_dirs(cpp=False):
+#    '''OSX 10.14 and later split the /usr/include contents everywhere'''
+#    include_dirs = []
+#    if sys.platform != 'darwin':
+#        return include_dirs
+#
+#    paths = {
+#        'C': [
+#            '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/',
+#        ],
+#        'C++': [
+#            '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1/',
+#        ],
+#    }
+#
+#    for path in paths['C']:
+#        if os.path.isdir(path):
+#            include_dirs.append(path)
+#    if cpp:
+#        for path in paths['C++']:
+#            if os.path.isdir(path):
+#                include_dirs.append(path)
+#
+#    return include_dirs
 
 
 def get_library_dirs_cpp():
@@ -174,7 +157,7 @@ class Preprocess_command(Command):
         from subprocess import SubprocessError
 
         def c(x): return check_call(x, shell=True)
-        def p(x): return self.announce(x, level=logINFO)
+        def p(x): return self.announce(x, level=2)
 
         # CYTHON
         p('cythonizing')
@@ -195,11 +178,15 @@ class Preprocess_command(Command):
         pyswigged = 'src/StepVector.py'
         try:
             c(swig+' -Wall -c++ -python -py3 src/StepVector.i')
+            p('Files transpiled')
         except SubprocessError:
             if (os.path.isfile('src/StepVector_wrap.cxx') and
                     os.path.isfile('src/StepVector.py')):
                 p('SWIG not found, but transpiled files found')
             else:
+                p('swig not found and traspiled files not found.\n' +
+                  'Install SWIG via your package manager (linux) or ' +
+                  'via "brew install swig" (OSX - via homebrew)')
                 raise
         p('moving swigged .py module')
         copy(pyswigged, 'HTSeq/StepVector.py')
@@ -238,12 +225,12 @@ setup(name='HTSeq',
          Extension(
              'HTSeq._HTSeq',
              ['src/_HTSeq.c'],
-             include_dirs=[numpy_include_dir]+get_include_dirs(),
+             include_dirs=[numpy_include_dir],#+get_include_dirs(),
              extra_compile_args=['-w']),
          Extension(
              'HTSeq._StepVector',
              ['src/StepVector_wrap.cxx'],
-             include_dirs=get_include_dirs(cpp=True),
+             #include_dirs=get_include_dirs(cpp=True),
              library_dirs=get_library_dirs_cpp(),
              extra_compile_args=['-w'] + get_extra_args_cpp(),
              extra_link_args=get_extra_args_cpp(),

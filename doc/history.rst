@@ -4,14 +4,58 @@
 Version history
 ***************
 
-Next version (current master)
-=============================
-TBA
+Version 2.0.4
+=============
+2023-08-XX
 
-Major release. All users are encouraged to upgrade (when released!).
+All users are encouraged to upgrade.
+
+- `htseq-count` now checks if any chromosome names match between the BAM and GFF/GTF file. If not, it shows a warning to stderr.
+- Python 3.11 is covered on CI build and deploy (linux only - OSX is not supported by `pysam` yet).
+
+Version 2.0.3
+=============
+2023-05-16
+
+Bugfix release. All users are encouraged to upgrade.
+
+- `GenomicInterval_from_directional` had a typo (issue #62). Thanks @justinaruda for spotting it.
+
+Version 2.0.2
+=============
+2022-07-03
+
+Bugfix release. All users are encouraged to upgrade.
+
+Scripts:
+
+- ``htseq-count`` had silently adopted a new logic to handle a corner case where read 1 was missing but read 2 was present. This has now been reverted
+  to ensure exact compatibility with ``HTSeq<=0.13.5``.
+
+
+Version 2.0.1
+=============
+2022-03-25
+
+Maintenance version. Users are not required to upgrade.
+
+CI:
+
+- Updated docker CI requirements.
+
+Version 2.0.0
+=============
+2022-03-22
+
+Major release. All users are encouraged to upgrade.
+
+Publication:
+
+- New paper describing HTSeq 2.0 in [Bioinformatics](https://doi.org/10.1093/bioinformatics/btac166). **Please cite the new paper** to help us maintain HTSeq!
 
 API features:
 
+- Support for StretchVector, a data structure for "island-of-data" sparsity
 - Added BigWig_Reader
 - Added I/O functions for ``GenomicArray`` to/from bedGraph and BigWig files
 - ``make_feature_genomicarrayofsets`` now supports multiple primary attributes
@@ -25,6 +69,7 @@ Scripts:
 - Added exon-level counting to ``htseq-count``
 - Added output formats to ``htseq-count``: loom, h5ad, mtx files
 - The above all apply to ``htseq-count-barcodes`` as well.
+- Added ``--with-header`` option to ``htseq-count``.
 
 Documentation:
 
@@ -45,6 +90,7 @@ Bug fixes:
 - Fixed a bug about ``ChromVector`` steps.
 - Fixed a bug about file opening (thanks @mruffalo)
 - Fixed a bug about ambiguous reads (thanks @Mashin6)
+- Fixed a typo in the docs (thanks @Tejindersingh1)
 - Improved style of code and documentation
 
 Version 0.13.5
